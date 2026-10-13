@@ -162,6 +162,17 @@ void* MapViewOfFile_hook(AFUNPTR MapViewOfFile_orig, ADDRINT ret_addr, CONTEXT *
 {
     void *ret;
 
+    // Log every call, not only the one that matches the license head.
+    //
+    // Round 70 showed the redirect working -- the target asks for regkey.dat, the
+    // hook rewrites the path, and the target opens our file -- but nothing after
+    // that. Stage 0 is built on the license being memory-mapped: lic_mapped is set
+    // only here, and record_license_copy returns early until it is. If the target
+    // reads the license with ReadFile instead, no amount of hooking gets Stage 0 to
+    // start, and that is worth knowing from the log rather than by inference.
+    logfile << "MapViewOfFile: size=" << std::dec << dwNumberOfBytesToMap
+        << " access=0x" << std::hex << dwDesiredAccess << std::endl;
+
     // Call the real MapViewOfFile
     PIN_CallApplicationFunction(ctxt, PIN_ThreadId(), CALLINGSTD_STDCALL, MapViewOfFile_orig, NULL, PIN_PARG(void*), &ret,
         PIN_PARG(HANDLE),   hFileMappingObject,
@@ -197,6 +208,21 @@ void* MapViewOfFile_hook(AFUNPTR MapViewOfFile_orig, ADDRINT ret_addr, CONTEXT *
     }
 
     return ret;
+}
+
+// ReadFile hook: is the license read instead of mapped?
+//
+// Stage 0 assumes a memory-mapped license. If the target reads the file instead,
+// there is no mapping to hook and the analysis never starts -- so log reads whose
+// size is in the license's range and settle it from the log.
+VOID ReadFile_before(ADDRINT handle, ADDRINT buffer, ADDRINT size)
+{
+    if (size >= 400 && size <= 600)
+    {
+        logfile << "ReadFile: size=" << std::dec << size
+            << " handle=" << std::hex << handle
+            << " buffer=" << buffer << std::endl;
+    }
 }
 
 // Mapped license file will be copied to a new memory location 1 byte at a time
@@ -400,6 +426,19 @@ VOID imgInstrumentation(IMG img, VOID* val)
             RTN_Open(rtn);
             RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)UnmapViewOfFile_before,
                 IARG_FUNCARG_ENTRYPOINT_VALUE, 0, IARG_END);
+            RTN_Close(rtn);
+        }
+
+        // Is the license read rather than mapped?
+        rtn = RTN_FindByName(img, "ReadFile");
+
+        if (rtn != RTN_Invalid())
+        {
+            RTN_Open(rtn);
+            RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)ReadFile_before,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2, IARG_END);
             RTN_Close(rtn);
         }
 
