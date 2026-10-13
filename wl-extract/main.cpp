@@ -105,11 +105,27 @@ VOID NtCreateFile_before(ADDRINT objectAttributesArg)
     // Get ObjectAttributes pointer from arguments
     OBJECT_ATTRIBUTES *ObjectAttributes = (OBJECT_ATTRIBUTES*) objectAttributesArg;
 
+    static size_t path_count = 0;
+
     if (ObjectAttributes && ObjectAttributes->ObjectName && ObjectAttributes->ObjectName->Buffer)
     {
         std::wstring wpath(ObjectAttributes->ObjectName->Buffer);
         std::string path(wpath.begin(), wpath.end());
-        
+
+        // Log every file the target opens, not only the ones that match.
+        //
+        // Round 69 proved the hooks are installed (KERNEL32/ntdll/USER32 all report)
+        // and yet NtCreateFile never matched: no 'Original license path:' line, no
+        // mapping, no progress. The open question is whether the target opens a
+        // license file at all and under what name -- whatlicense only ever looks for
+        // 'regkey.dat', which is the name in the build it was written against. Print
+        // the paths and the answer is in the log instead of in a guess.
+        if (path_count < 40)
+        {
+            path_count++;
+            logfile << "NtCreateFile: " << path << std::endl;
+        }
+
         if (string_endswith(path, "regkey.dat") && (path != lic.nt_path))
         {
             logfile << "Original license path:\t" << path << std::endl;
