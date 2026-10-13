@@ -206,15 +206,26 @@ VOID stage1::mp_exptmod_handler(ADDRINT addr, CONTEXT* ctxt)
 	if (addr != mp_exptmod_addr)
 		return;
 
+	// mp_exptmod(G, X, P, Y): X is the exponent and P the modulus, i.e. the key
+	// components this stage swaps.
+	//
+	// The original reads them off the stack at [esp+8] and [esp+0xc], which is the
+	// IA-32 calling convention. On x64 those two arguments live in rdx and r8; the
+	// stack slots hold unrelated frame data, and writing key pointers into them is
+	// what produced the RECEIVED_ACCESS_FAULT this port kept dying on. Use the
+	// registers when building for x64.
+#ifdef TARGET_IA32E
+	mp_int *e = (mp_int*)PIN_GetContextReg(ctxt, REG_RDX);
+	mp_int *N = (mp_int*)PIN_GetContextReg(ctxt, REG_R8);
+#else
 	ADDRINT esp = PIN_GetContextReg(ctxt, REG_ESP);
+	mp_int *e = (mp_int*)rdword(esp + 8);
+	mp_int *N = (mp_int*)rdword(esp + 0xc);
+#endif
 
 	// rsa_public_2 is to used decrypt the license in segments
 	// then rsa_public_1 is used to verify the signature
 	static size_t count = 0;
-
-	// Get key component arguments
-	mp_int *e = (mp_int*)rdword(esp + 8);
-	mp_int *N = (mp_int*)rdword(esp + 0xc);
 
 	// The license is decrypted in 0x80 byte sections, then the signature is verified
 	// We need to keep up with where we are and swap in the right keys for our license file
@@ -237,8 +248,13 @@ VOID stage1::mp_exptmod_handler(ADDRINT addr, CONTEXT* ctxt)
 		}
 
 		// Swap in the key that will decrypt our license file
+#ifdef TARGET_IA32E
+		PIN_SetContextReg(ctxt, REG_RDX, (ADDRINT) lic_det.rsa_key_2.exp());
+		PIN_SetContextReg(ctxt, REG_R8,  (ADDRINT) lic_det.rsa_key_2.n());
+#else
 		rdword(esp + 8)   = (ADDRINT) lic_det.rsa_key_2.exp();
 		rdword(esp + 0xc) = (ADDRINT) lic_det.rsa_key_2.n();
+#endif
 	}
 	else
 	{
@@ -253,8 +269,13 @@ VOID stage1::mp_exptmod_handler(ADDRINT addr, CONTEXT* ctxt)
 		logfile << std::endl;
 
 		// Swap in the public key needed to verify our license signature
+#ifdef TARGET_IA32E
+		PIN_SetContextReg(ctxt, REG_RDX, (ADDRINT) lic_det.rsa_key_1.exp());
+		PIN_SetContextReg(ctxt, REG_R8,  (ADDRINT) lic_det.rsa_key_1.n());
+#else
 		rdword(esp + 8)   = (ADDRINT) lic_det.rsa_key_1.exp();
 		rdword(esp + 0xc) = (ADDRINT) lic_det.rsa_key_1.n();
+#endif
 
 		sub_stage = 6;
 	}
