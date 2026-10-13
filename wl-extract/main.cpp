@@ -92,10 +92,18 @@ ADDRINT lic_copy = 0;
 
 // NtCreateFile hook
 // Redirects attempt to open original license file location to the supplied license file
-VOID NtCreateFile_before(ADDRINT esp)
+// NtCreateFile hook
+//
+// The original took the raw esp and read the ObjectAttributes pointer out of the
+// stack at [esp+0xc] -- the 3rd argument under the IA-32 convention. On x64 the
+// arguments are in registers (rcx/rdx/r8/r9) and that stack slot holds unrelated
+// frame data, so the pointer read from it is garbage and dereferencing it faults.
+// Let PIN supply the argument instead: IARG_FUNCARG_ENTRYPOINT_VALUE applies the
+// right calling convention on both architectures.
+VOID NtCreateFile_before(ADDRINT objectAttributesArg)
 {
     // Get ObjectAttributes pointer from arguments
-    OBJECT_ATTRIBUTES *ObjectAttributes = *((OBJECT_ATTRIBUTES**)(esp + 0xc));
+    OBJECT_ATTRIBUTES *ObjectAttributes = (OBJECT_ATTRIBUTES*) objectAttributesArg;
 
     if (ObjectAttributes && ObjectAttributes->ObjectName && ObjectAttributes->ObjectName->Buffer)
     {
@@ -173,14 +181,20 @@ VOID record_license_copy(ADDRINT ea)
 
 // UnmapViewOfFile hook
 // Search for license data copy location after license file is unmapped
-VOID UnmapViewOfFile_before(ADDRINT esp)
+//
+// Same x86 assumption as NtCreateFile_before: the base address is the 1st
+// argument, which the original read from [esp+4]. On x64 that is rcx, and the
+// stack slot holds frame data -- SafeCopy'ing 8 bytes from the garbage pointer is
+// what produced the RECEIVED_ACCESS_FAULT immediately after "Searching for license
+// file memory mapping...". Take the argument from PIN instead.
+VOID UnmapViewOfFile_before(ADDRINT baseAddress)
 {
     if (lic_mapped && (PIN_GetTid() == main_thread))
     {
         char mapped[8];
         
         // Grab the first 8 bytes of the data being unmapped
-        if (PIN_SafeCopy(mapped, (void *) rdword(esp+4), 8) != 8)
+        if (PIN_SafeCopy(mapped, (void *) baseAddress, 8) != 8)
             return;
 
         // Compare the beginning of the data being unmapped to the license file data
@@ -224,9 +238,8 @@ VOID UnmapViewOfFile_before(ADDRINT esp)
 }
 
 // MessageBoxExA hook to scan error messages for HWID and debugger warnings
-VOID MessageBoxExA_before(ADDRINT esp)
+VOID MessageBoxExA_before(char *text, char *caption)
 {
-    char *text = *((char**)(esp + 8)), *caption = *((char**)(esp + 0xc));
 
     if (!text || !caption)
         return;
@@ -258,17 +271,17 @@ VOID MessageBoxExA_before(ADDRINT esp)
 }
 
 // SetClipboardData hook to scan for HWID
-VOID SetClipboardData_before(ADDRINT esp, CONTEXT* ctxt)
+VOID SetClipboardData_before(ADDRINT format, ADDRINT handle, CONTEXT* ctxt)
 {
     // Is the clipboard data type CF_TEXT?
-    if (GlobalLock && GlobalUnlock && (rdword(esp + 4) == 1))
+    if (GlobalLock && GlobalUnlock && (format == 1))
     {
         char *data;
 
         // The data handle argument to SetClipboardData refers to a global (system wide) memory object
         // We have to use GlobalLock to get a pointer the real buffer, then GlobalUnlock to release access
         PIN_CallApplicationFunction(ctxt, PIN_ThreadId(), CALLINGSTD_STDCALL, (AFUNPTR) GlobalLock, NULL, PIN_PARG(char*), &data,
-            PIN_PARG(HANDLE), (HANDLE) rdword(esp + 8),
+            PIN_PARG(HANDLE), (HANDLE) handle,
             PIN_PARG_END());
 
         char hwid[40];
@@ -278,7 +291,7 @@ VOID SetClipboardData_before(ADDRINT esp, CONTEXT* ctxt)
 
         // GlobalUnlock to release access
         PIN_CallApplicationFunction(ctxt, PIN_ThreadId(), CALLINGSTD_STDCALL, (AFUNPTR)GlobalUnlock, NULL, PIN_PARG(bool), (bool*) &data,
-            PIN_PARG(HANDLE), (HANDLE)rdword(esp + 8),
+            PIN_PARG(HANDLE), (HANDLE) handle,
             PIN_PARG_END());
     }
 }
@@ -302,7 +315,8 @@ VOID imgInstrumentation(IMG img, VOID* val)
             if (rtn != RTN_Invalid())
             {
                 RTN_Open(rtn);
-                RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)NtCreateFile_before, IARG_REG_VALUE, REG_ESP, IARG_END);
+                RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)NtCreateFile_before,
+                    IARG_FUNCARG_ENTRYPOINT_VALUE, 2, IARG_END);
                 RTN_Close(rtn);
             }
         }
@@ -337,7 +351,8 @@ VOID imgInstrumentation(IMG img, VOID* val)
         if (rtn != RTN_Invalid())
         {
             RTN_Open(rtn);
-            RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)UnmapViewOfFile_before, IARG_REG_VALUE, REG_ESP, IARG_END);
+            RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)UnmapViewOfFile_before,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0, IARG_END);
             RTN_Close(rtn);
         }
 
@@ -357,7 +372,9 @@ VOID imgInstrumentation(IMG img, VOID* val)
         if (rtn != RTN_Invalid())
         {
             RTN_Open(rtn);
-            RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)MessageBoxExA_before, IARG_REG_VALUE, REG_ESP, IARG_END);
+            RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)MessageBoxExA_before,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2, IARG_END);
             RTN_Close(rtn);
         }
 
@@ -369,7 +386,9 @@ VOID imgInstrumentation(IMG img, VOID* val)
             if (rtn != RTN_Invalid())
             {
                 RTN_Open(rtn);
-                RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)SetClipboardData_before, IARG_REG_VALUE, REG_ESP, IARG_CONTEXT, IARG_END);
+                RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)SetClipboardData_before,
+                    IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                    IARG_FUNCARG_ENTRYPOINT_VALUE, 1, IARG_CONTEXT, IARG_END);
                 RTN_Close(rtn);
             }
         }

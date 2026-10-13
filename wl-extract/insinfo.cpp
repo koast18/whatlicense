@@ -70,7 +70,14 @@ namespace ii
 		return ((rbyte(addr) == 0xD3) && (rbyte(addr + 1) >> 3 == 5));
 	}
 
+	// The mod_rm encoding order is the same on both architectures; only the
+	// register width differs. Under x64 the 32-bit names would resolve to the low
+	// halves, so stage2's "cmp word ptr [reg1], reg2" would read the wrong base.
+#ifdef TARGET_IA32E
+	const LEVEL_BASE::REG regs[] = { REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSP, REG_RBP, REG_RSI, REG_RDI };
+#else
 	const LEVEL_BASE::REG regs[] = { REG_EAX, REG_ECX, REG_EDX, REG_EBX, REG_ESP, REG_EBP, REG_ESI, REG_EDI };
+#endif
 
 	// Returns memory register reg1 when used on "cmp word ptr [reg1], reg2"
 	LEVEL_BASE::REG WordPtrRegCmp_memreg(ADDRINT addr)
