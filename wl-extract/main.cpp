@@ -64,6 +64,12 @@ lic_details lic;
 // Everything relevant happens in main thread
 OS_THREAD_ID main_thread = 0;
 
+// Set by NtMapViewOfSection_before, resolved on the next opportunity -- BaseAddress
+// is an out-parameter there, so it is only readable after the call returns.
+ADDRINT pending_map_base = 0;
+
+VOID resolve_pending_mapping();
+
 // Clipboard data locking functions
 ADDRINT GlobalLock = 0, GlobalUnlock = 0;
 
@@ -208,6 +214,67 @@ void* MapViewOfFile_hook(AFUNPTR MapViewOfFile_orig, ADDRINT ret_addr, CONTEXT *
     }
 
     return ret;
+}
+
+// NtMapViewOfSection hook: the native mapping.
+//
+// Round 72 showed the target neither maps (MapViewOfFile) nor reads (ReadFile,
+// NtReadFile) its license, yet it does open it -- through NtCreateFile. The remaining
+// way to get a file's bytes into memory is a section, and a target that uses the
+// native file API uses the native section API too.
+//
+// BaseAddress is the 3rd argument and it is an out-parameter, so it is only valid
+// after the call returns. Record the pointer here and resolve it on the next
+// instruction, which is soon enough: the copy that Stage 0 tracks happens later.
+VOID NtMapViewOfSection_before(ADDRINT sectionHandle, ADDRINT baseAddressPtr,
+    ADDRINT viewSize)
+{
+    logfile << "NtMapViewOfSection: handle=" << std::hex << sectionHandle
+        << " basePtr=" << baseAddressPtr
+        << " viewSize=" << viewSize << std::endl;
+
+    // Resolve a pointer recorded on an earlier call, now that it is valid.
+    resolve_pending_mapping();
+
+    pending_map_base = baseAddressPtr;
+}
+
+// Read back the mapping address NtMapViewOfSection wrote, and check it for the
+// license head. Called from the next instrumented instruction, and from the next
+// NtMapViewOfSection call.
+VOID resolve_pending_mapping()
+{
+    if (pending_map_base == 0 || lic_mapped)
+    {
+        pending_map_base = 0;
+        return;
+    }
+
+    ADDRINT base = 0;
+    ADDRINT ptr_value = pending_map_base;
+    pending_map_base = 0;
+
+    if (PIN_SafeCopy(&base, (void*)ptr_value, sizeof(ADDRINT)) != sizeof(ADDRINT))
+        return;
+
+    if (base == 0)
+        return;
+
+    char head[8];
+
+    if ((PIN_SafeCopy(head, (void*)base, 8) == 8) && !memcmp(head, lic.head.c_str(), 8))
+    {
+        logfile << "License file mapped to (native): " << std::hex << base << std::endl;
+        lic_mapped = true;
+
+        if (main_thread == 0)
+            main_thread = PIN_GetTid();
+    }
+    else
+    {
+        logfile << "NtMapViewOfSection: base " << std::hex << base
+            << " is not the license" << std::endl;
+    }
 }
 
 // ReadFile hook: is the license read instead of mapped?
@@ -465,6 +532,21 @@ VOID imgInstrumentation(IMG img, VOID* val)
                 IARG_FUNCARG_ENTRYPOINT_VALUE, 6, IARG_END);
             RTN_Close(read_rtn);
         }
+
+        // NtMapViewOfSection(SectionHandle, ProcessHandle, BaseAddress, ZeroBits,
+        //   CommitSize, SectionOffset, ViewSize, InheritDisposition, AllocationType,
+        //   Win32Protect) -- handle 0, base 2, view size 6.
+        RTN map_rtn = RTN_FindByName(img, "NtMapViewOfSection");
+
+        if (map_rtn != RTN_Invalid())
+        {
+            RTN_Open(map_rtn);
+            RTN_InsertCall(map_rtn, IPOINT_BEFORE, (AFUNPTR)NtMapViewOfSection_before,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 6, IARG_END);
+            RTN_Close(map_rtn);
+        }
     }
     else if (string_endswith(img_name, "kernel32.dll"))
     {
@@ -567,6 +649,11 @@ VOID insInstrumentation(INS ins, VOID* v)
     // It's still slower than running natively, but that's where we're at right now
     if (!mgr.attached())
         return;
+
+    // A mapping recorded by NtMapViewOfSection_before becomes readable as soon as the
+    // call returns; new code being translated is the earliest convenient moment to
+    // pick it up, and it is cheap (a null check) once resolved.
+    resolve_pending_mapping();
 
     ADDRINT addr = INS_Address(ins);
 
