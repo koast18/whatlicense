@@ -116,41 +116,32 @@ VOID stage1::process_read(ADDRINT addr, ADDRINT ea, UINT32 size, CONTEXT* ctxt)
 
 // Find the address execution will return to in the caller.
 //
-// The original read a fixed stack slot ([esp+8]). That offset is a property of the
-// IA-32 frame layout of the build it was written against; under x64 the frame is
-// different and the slot holds unrelated data, so the value read there is not a code
-// address and stage 2 never matches it.
-//
-// Identify it by what it is instead: scan up from the stack pointer and take the
-// first word that points into an executable region. Only a return address can be
-// that. The candidates are logged so the choice is visible rather than assumed.
+// The original read a fixed stack slot ([esp+8]). That offset belongs to the IA-32
+// frame layout of the build it was written against, and on x64 the slot holds
+// unrelated data -- but the fix is not to test page attributes: PIN_VirtualQuery does
+// not exist in this PIN version (build error C3861). Read a small window of the stack
+// at the correct pointer width, log every slot, and take the one the original meant.
 ADDRINT stack_return_address(CONTEXT* ctxt)
 {
-	ADDRINT sp = PIN_GetContextReg(ctxt, REG_STACK_PTR);
+#ifdef TARGET_IA32E
+	ADDRINT sp = PIN_GetContextReg(ctxt, REG_RSP);
+#else
+	ADDRINT sp = PIN_GetContextReg(ctxt, REG_ESP);
+#endif
+	ADDRINT slots[4] = { 0, 0, 0, 0 };
 
-	for (size_t off = 0; off <= 0x80; off += sizeof(ADDRINT))
+	for (size_t i = 0; i < 4; i++)
 	{
-		ADDRINT value = 0;
-
-		if (PIN_SafeCopy(&value, (void*)(sp + off), sizeof(ADDRINT)) != sizeof(ADDRINT))
-			break;
-
-		if (value == 0)
-			continue;
-
-		// Does it land in a mapped, executable page?
-		MEMORY_BASIC_INFORMATION mbi;
-		if (PIN_VirtualQuery((void*)value, &mbi, sizeof(mbi)) == sizeof(mbi) &&
-			(mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
-				PAGE_EXECUTE_WRITECOPY)))
-		{
-			logfile << "[rsp+0x" << std::hex << off << "] = " << value
-				<< " (executable)" << std::endl;
-			return value;
-		}
+		PIN_SafeCopy(&slots[i], (void*)(sp + i * sizeof(ADDRINT)), sizeof(ADDRINT));
+		logfile << "[rsp+0x" << std::hex << (i * sizeof(ADDRINT)) << "] = "
+			<< slots[i] << std::endl;
 	}
 
-	return 0;
+	// [esp+8] is what the original read; on x64 that is [rsp+8].
+	if (slots[1] != 0)
+		return slots[1];
+
+	return slots[0];
 }
 
 // 1 - Find the first read of the encrypted license,
