@@ -277,6 +277,35 @@ VOID resolve_pending_mapping()
     }
 }
 
+// NtOpenKey hook: is the license in the registry?
+//
+// Round 73 counted 99 NtMapViewOfSection calls -- the hook works and 47 bases were
+// correctly rejected as not the license -- while the license file itself is opened and
+// then never read by any route (ReadFile, NtReadFile, MapViewOfFile, a section). A
+// file that is opened for its existence and never read suggests the data comes from
+// somewhere else, and 'regkey.dat' is also the registry key WinLicense uses.
+//
+// NtOpenKey(KeyHandle, DesiredAccess, ObjectAttributes) -- ObjectAttributes is arg 2,
+// the same shape as NtCreateFile, so the name is read the same way.
+VOID NtOpenKey_before(ADDRINT objectAttributesArg)
+{
+    static size_t key_count = 0;
+
+    if (objectAttributesArg == 0 || key_count >= 60)
+        return;
+
+    OBJECT_ATTRIBUTES *ObjectAttributes = (OBJECT_ATTRIBUTES*) objectAttributesArg;
+
+    if (ObjectAttributes->ObjectName && ObjectAttributes->ObjectName->Buffer)
+    {
+        std::wstring wpath(ObjectAttributes->ObjectName->Buffer);
+        std::string path(wpath.begin(), wpath.end());
+
+        key_count++;
+        logfile << "NtOpenKey: " << path << std::endl;
+    }
+}
+
 // ReadFile hook: is the license read instead of mapped?
 //
 // Stage 0 assumes a memory-mapped license. If the target reads the file instead,
@@ -546,6 +575,20 @@ VOID imgInstrumentation(IMG img, VOID* val)
                 IARG_FUNCARG_ENTRYPOINT_VALUE, 2,
                 IARG_FUNCARG_ENTRYPOINT_VALUE, 6, IARG_END);
             RTN_Close(map_rtn);
+        }
+
+        // Where the license might actually come from: the registry.
+        for (const char *key_name : { "ZwOpenKey", "NtOpenKey" })
+        {
+            RTN key_rtn = RTN_FindByName(img, key_name);
+
+            if (key_rtn != RTN_Invalid())
+            {
+                RTN_Open(key_rtn);
+                RTN_InsertCall(key_rtn, IPOINT_BEFORE, (AFUNPTR)NtOpenKey_before,
+                    IARG_FUNCARG_ENTRYPOINT_VALUE, 2, IARG_END);
+                RTN_Close(key_rtn);
+            }
         }
     }
     else if (string_endswith(img_name, "kernel32.dll"))
