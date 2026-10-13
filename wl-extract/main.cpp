@@ -711,6 +711,29 @@ VOID insInstrumentation(INS ins, VOID* v)
     if (!mgr.attached())
         return;
 
+    // Diagnostic switch: hooks only, no per-instruction instrumentation.
+    //
+    // Round 75 settled how this target loads its license: it opens the file and then
+    // never reads it by any route -- one NtReadFile of 60 bytes, zero MapViewOfFile,
+    // zero ReadFile. Under Frida the same target does read its license (guard hits
+    // every run), so the difference is the instrument, not the target. WinLicense is
+    // known to hunt for instrumentation, and whatlicense's own notes warn about it.
+    //
+    // WL_NO_INSTRUMENT=1 keeps every API hook but skips INS_AddInstrumentFunction, so
+    // the target runs under a far lighter footprint. If it reads the license then, the
+    // detection is via the instruction instrumentation and that is worth knowing before
+    // building anything on top of Stage 0.
+    static int no_instrument = -1;
+
+    if (no_instrument < 0)
+    {
+        const char *flag = getenv("WL_NO_INSTRUMENT");
+        no_instrument = (flag != nullptr && flag[0] == '1') ? 1 : 0;
+    }
+
+    if (no_instrument)
+        return;
+
     // A mapping recorded by NtMapViewOfSection_before becomes readable as soon as the
     // call returns; new code being translated is the earliest convenient moment to
     // pick it up, and it is cheap (a null check) once resolved.
