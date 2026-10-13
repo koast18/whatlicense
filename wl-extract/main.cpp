@@ -225,6 +225,35 @@ VOID ReadFile_before(ADDRINT handle, ADDRINT buffer, ADDRINT size)
     }
 }
 
+// NtReadFile hook: the target talks to ntdll directly.
+//
+// Round 71 logged every MapViewOfFile and every in-range ReadFile and got zero of
+// both, while the target demonstrably opened the license -- through NtCreateFile,
+// the native API, which is the hook that does fire. A binary that opens its license
+// that way reads it the same way, so the kernel32 wrappers whatlicense hooks are
+// never on its path.
+//
+// Treat a read of the license's size as the moment the license is in memory. Stage 0
+// no longer waits for a mapping that will not come: lic_mapped starts the byte-store
+// tracking, and the copy is resolved by content from the candidates that tracking
+// collects (see record_license_copy).
+VOID NtReadFile_before(ADDRINT handle, ADDRINT buffer, ADDRINT length)
+{
+    if (length >= 400 && length <= 600)
+    {
+        logfile << "NtReadFile: length=" << std::dec << length
+            << " handle=" << std::hex << handle
+            << " buffer=" << buffer << std::endl;
+
+        if (!lic_mapped)
+        {
+            lic_mapped = true;
+            logfile << "lic_mapped set from NtReadFile (no mapping in this target)"
+                << std::endl;
+        }
+    }
+}
+
 // Mapped license file will be copied to a new memory location 1 byte at a time
 // We log potential start locations written to while it is mapped
 // These will be searched for the license data copy after original file is unmapped
@@ -234,7 +263,35 @@ VOID record_license_copy(ADDRINT ea)
     // Log all addresses where first byte of regkey data is written during copy loop
     // One of these will be the start of the copied license data
     if (lic_mapped && (PIN_GetTid() == main_thread) && (rbyte(ea) == (lic.head[0] & 0xff)))
+    {
         copy_set.insert(ea);
+
+        // Resolve the copy here, not only on unmap.
+        //
+        // UnmapViewOfFile_before is where lic_copy was originally resolved, which
+        // assumes the target maps the license and then unmaps it. This target does
+        // neither -- it reads the license through NtReadFile -- so that resolution
+        // never runs and Stage 1 never gets a pre_rsa_buf to work from. The address
+        // just recorded is where the first license byte was written; if the eight
+        // bytes there are the license head, this is the copy.
+        //
+        // The head is written first, so resolving here does not cost the rest of the
+        // tracking: only the start address is needed, and Stage 1's instrumentation
+        // (which depends on lic_copy being set) is needed much later, at the RSA
+        // read.
+        if (lic_copy == 0)
+        {
+            char candidate[8];
+
+            if ((PIN_SafeCopy(candidate, (void*)ea, 8) == 8) &&
+                !memcmp(candidate, lic.head.c_str(), 8))
+            {
+                lic_copy = ea;
+                logfile << "License data copied to (by content): " << std::hex
+                    << lic_copy << std::endl;
+            }
+        }
+    }
 }
 
 // UnmapViewOfFile hook
@@ -392,6 +449,21 @@ VOID imgInstrumentation(IMG img, VOID* val)
                     IARG_FUNCARG_ENTRYPOINT_VALUE, 2, IARG_END);
                 RTN_Close(rtn);
             }
+        }
+
+        // The native read, for targets that bypass the kernel32 wrappers.
+        // NtReadFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock,
+        //            Buffer, Length, ByteOffset, Key) -- buffer is arg 5, length 6.
+        RTN read_rtn = RTN_FindByName(img, "NtReadFile");
+
+        if (read_rtn != RTN_Invalid())
+        {
+            RTN_Open(read_rtn);
+            RTN_InsertCall(read_rtn, IPOINT_BEFORE, (AFUNPTR)NtReadFile_before,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 5,
+                IARG_FUNCARG_ENTRYPOINT_VALUE, 6, IARG_END);
+            RTN_Close(read_rtn);
         }
     }
     else if (string_endswith(img_name, "kernel32.dll"))
