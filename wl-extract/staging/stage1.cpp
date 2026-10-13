@@ -114,6 +114,45 @@ VOID stage1::process_read(ADDRINT addr, ADDRINT ea, UINT32 size, CONTEXT* ctxt)
 *  Sub-stages
 *********************/
 
+// Find the address execution will return to in the caller.
+//
+// The original read a fixed stack slot ([esp+8]). That offset is a property of the
+// IA-32 frame layout of the build it was written against; under x64 the frame is
+// different and the slot holds unrelated data, so the value read there is not a code
+// address and stage 2 never matches it.
+//
+// Identify it by what it is instead: scan up from the stack pointer and take the
+// first word that points into an executable region. Only a return address can be
+// that. The candidates are logged so the choice is visible rather than assumed.
+ADDRINT stack_return_address(CONTEXT* ctxt)
+{
+	ADDRINT sp = PIN_GetContextReg(ctxt, REG_STACK_PTR);
+
+	for (size_t off = 0; off <= 0x80; off += sizeof(ADDRINT))
+	{
+		ADDRINT value = 0;
+
+		if (PIN_SafeCopy(&value, (void*)(sp + off), sizeof(ADDRINT)) != sizeof(ADDRINT))
+			break;
+
+		if (value == 0)
+			continue;
+
+		// Does it land in a mapped, executable page?
+		MEMORY_BASIC_INFORMATION mbi;
+		if (PIN_VirtualQuery((void*)value, &mbi, sizeof(mbi)) == sizeof(mbi) &&
+			(mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+				PAGE_EXECUTE_WRITECOPY)))
+		{
+			logfile << "[rsp+0x" << std::hex << off << "] = " << value
+				<< " (executable)" << std::endl;
+			return value;
+		}
+	}
+
+	return 0;
+}
+
 // 1 - Find the first read of the encrypted license,
 // (occurs inside of libtomcrypt's mp_read_unsigned_bin)
 VOID stage1::find_enclic_read(ADDRINT addr, ADDRINT ea, UINT32 size, CONTEXT* ctxt)
@@ -126,7 +165,7 @@ VOID stage1::find_enclic_read(ADDRINT addr, ADDRINT ea, UINT32 size, CONTEXT* ct
 		logfile << "License copy read at: " << std::hex << addr << " (inside mp_read_unsigned_bin)" << std::endl;
 		
 		// Save the return address back in rsa_exptmod
-		ret_to_rsaexptmod = rdword(PIN_GetContextReg(ctxt, REG_ESP) + 8);
+		ret_to_rsaexptmod = stack_return_address(ctxt);
 		logfile << "Return to rsa_exptmod: " << ret_to_rsaexptmod << std::endl;
 
 		sub_stage = 2;
