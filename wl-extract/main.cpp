@@ -313,8 +313,13 @@ VOID NtOpenKey_before(ADDRINT objectAttributesArg)
 // size is in the license's range and settle it from the log.
 VOID ReadFile_before(ADDRINT handle, ADDRINT buffer, ADDRINT size)
 {
-    if (size >= 400 && size <= 600)
+    // No size filter, for the same reason as NtReadFile_before: a buffered read is a
+    // page or more, and filtering on the license's own size hides the call.
+    static size_t rf_count = 0;
+
+    if (rf_count < 40)
     {
+        rf_count++;
         logfile << "ReadFile: size=" << std::dec << size
             << " handle=" << std::hex << handle
             << " buffer=" << buffer << std::endl;
@@ -335,18 +340,31 @@ VOID ReadFile_before(ADDRINT handle, ADDRINT buffer, ADDRINT size)
 // collects (see record_license_copy).
 VOID NtReadFile_before(ADDRINT handle, ADDRINT buffer, ADDRINT length)
 {
-    if (length >= 400 && length <= 600)
+    // Log every read, capped, with no size filter.
+    //
+    // The first version of this hook only logged reads of 400-600 bytes, on the
+    // assumption the target would read exactly one license. A buffered read is a page
+    // or more, so that filter hid the very call it was looking for -- round 74 saw
+    // zero NtReadFile lines and that proved nothing. Log them all and cap the count.
+    static size_t read_count = 0;
+
+    if (read_count < 80)
     {
+        read_count++;
         logfile << "NtReadFile: length=" << std::dec << length
             << " handle=" << std::hex << handle
             << " buffer=" << buffer << std::endl;
+    }
 
-        if (!lic_mapped)
-        {
-            lic_mapped = true;
-            logfile << "lic_mapped set from NtReadFile (no mapping in this target)"
-                << std::endl;
-        }
+    // Any real read of the redirected file puts the license in memory, which is what
+    // starts the byte-store tracking. The tracking itself checks the first byte
+    // against the license head, so a permissive gate costs nothing but correctness
+    // here -- and a strict size test is exactly what hid this call.
+    if (!lic_mapped && length >= 64)
+    {
+        lic_mapped = true;
+        logfile << "lic_mapped set from NtReadFile (no mapping in this target)"
+            << std::endl;
     }
 }
 
