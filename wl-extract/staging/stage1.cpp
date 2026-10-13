@@ -121,7 +121,7 @@ VOID stage1::process_read(ADDRINT addr, ADDRINT ea, UINT32 size, CONTEXT* ctxt)
 // unrelated data -- but the fix is not to test page attributes: PIN_VirtualQuery does
 // not exist in this PIN version (build error C3861). Read a small window of the stack
 // at the correct pointer width, log every slot, and take the one the original meant.
-ADDRINT stack_return_address(CONTEXT* ctxt)
+ADDRINT stack_return_address(CONTEXT* ctxt, std::ofstream& log)
 {
 #ifdef TARGET_IA32E
 	ADDRINT sp = PIN_GetContextReg(ctxt, REG_RSP);
@@ -133,7 +133,7 @@ ADDRINT stack_return_address(CONTEXT* ctxt)
 	for (size_t i = 0; i < 4; i++)
 	{
 		PIN_SafeCopy(&slots[i], (void*)(sp + i * sizeof(ADDRINT)), sizeof(ADDRINT));
-		logfile << "[rsp+0x" << std::hex << (i * sizeof(ADDRINT)) << "] = "
+		log << "[rsp+0x" << std::hex << (i * sizeof(ADDRINT)) << "] = "
 			<< slots[i] << std::endl;
 	}
 
@@ -156,7 +156,7 @@ VOID stage1::find_enclic_read(ADDRINT addr, ADDRINT ea, UINT32 size, CONTEXT* ct
 		logfile << "License copy read at: " << std::hex << addr << " (inside mp_read_unsigned_bin)" << std::endl;
 		
 		// Save the return address back in rsa_exptmod
-		ret_to_rsaexptmod = stack_return_address(ctxt);
+		ret_to_rsaexptmod = stack_return_address(ctxt, logfile);
 		logfile << "Return to rsa_exptmod: " << ret_to_rsaexptmod << std::endl;
 
 		sub_stage = 2;
