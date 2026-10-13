@@ -162,6 +162,22 @@ void* MapViewOfFile_hook(AFUNPTR MapViewOfFile_orig, ADDRINT ret_addr, CONTEXT *
     {
         logfile << "License file mapped to: " << std::hex << (ADDRINT)ret << std::endl;
         lic_mapped = true;
+
+        // The thread that maps the license is the thread we care about.
+        //
+        // main_thread used to be set only by NtCreateFile_before, which only fires
+        // when the path it sees ends in "regkey.dat" -- the license file name of the
+        // build whatlicense was written against. A target that names its license
+        // something else never sets it, and UnmapViewOfFile_before then returns
+        // immediately for every call (`tid == main_thread` can never hold with
+        // main_thread == 0), so the copy is never found and the run hangs silently
+        // until the deadline. Derive it from the mapping itself instead.
+        if (main_thread == 0)
+        {
+            main_thread = PIN_GetTid();
+            logfile << "main_thread taken from the mapping thread: " << std::hex
+                << main_thread << std::endl;
+        }
     }
 
     return ret;
@@ -303,6 +319,21 @@ VOID imgInstrumentation(IMG img, VOID* val)
         return;
 
     const std::string& img_name = IMG_Name(img);
+
+    // Say when a module of interest is hooked.
+    //
+    // Round 66 ran the target for 900 s (the orphan-kill line proves NgaHost was
+    // alive) and produced no hook output at all -- not even the MapViewOfFile line,
+    // which was already ABI-correct. That leaves two very different causes: the
+    // hooks are not installed, or the target never reaches the licence because the
+    // per-instruction instrumentation makes it crawl. Log the attach so the next run
+    // separates them instead of guessing.
+    if (string_endswith(img_name, "ntdll.dll") ||
+        string_endswith(img_name, "kernel32.dll") ||
+        string_endswith(img_name, "user32.dll"))
+    {
+        logfile << "Hooking module: " << img_name << std::endl;
+    }
 
     if (string_endswith(img_name, "ntdll.dll"))
     {
